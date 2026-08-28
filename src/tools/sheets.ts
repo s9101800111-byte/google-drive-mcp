@@ -86,6 +86,14 @@ const MergeGoogleSheetCellsSchema = z.object({
   mergeType: z.enum(["MERGE_ALL", "MERGE_COLUMNS", "MERGE_ROWS"])
 });
 
+const InsertSheetRowsSchema = z.object({
+  spreadsheetId: z.string().min(1, "Spreadsheet ID is required"),
+  sheetName: z.string().min(1, "Sheet name is required"),
+  beforeRow: z.number().int().min(1, "beforeRow must be >= 1 (1-based row number to insert before)"),
+  numRows: z.number().int().min(1).default(1),
+  inheritFromBefore: z.boolean().optional().default(true)
+});
+
 const AddGoogleSheetConditionalFormatSchema = z.object({
   spreadsheetId: z.string().min(1, "Spreadsheet ID is required"),
   range: z.string().min(1, "Range is required"),
@@ -367,6 +375,21 @@ export const toolDefinitions: ToolDefinition[] = [
         }
       },
       required: ["spreadsheetId", "range", "mergeType"]
+    }
+  },
+  {
+    name: "insertSheetRows",
+    description: "Insert one or more blank rows into a Google Sheet, shifting existing rows below down. Use this before writing data when a fixed block doesn't have enough rows for the new content.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        spreadsheetId: { type: "string", description: "Spreadsheet ID" },
+        sheetName: { type: "string", description: "Sheet/tab name (e.g., '0824-0828')" },
+        beforeRow: { type: "number", description: "1-based row number to insert the new row(s) before (e.g., 15 inserts above current row 15)" },
+        numRows: { type: "number", description: "How many rows to insert (default 1)" },
+        inheritFromBefore: { type: "boolean", description: "Inherit formatting from the row above the insertion point (default true)" }
+      },
+      required: ["spreadsheetId", "sheetName", "beforeRow"]
     }
   },
   {
@@ -972,6 +995,50 @@ export async function handleTool(
       };
     }
 
+    case "insertSheetRows": {
+      const validation = InsertSheetRowsSchema.safeParse(args);
+      if (!validation.success) {
+        return errorResponse(validation.error.errors[0].message);
+      }
+      const a = validation.data;
+
+      const sheets = ctx.google.sheets({ version: 'v4', auth: ctx.authClient });
+
+      const rangeData = await sheets.spreadsheets.get({
+        spreadsheetId: a.spreadsheetId,
+        fields: 'sheets(properties(sheetId,title))'
+      });
+
+      const sheet = rangeData.data.sheets?.find(s => s.properties?.title === a.sheetName);
+      if (!sheet || sheet.properties?.sheetId === undefined || sheet.properties?.sheetId === null) {
+        return errorResponse(`Sheet "${a.sheetName}" not found`);
+      }
+
+      const startIndex = a.beforeRow - 1;
+      const endIndex = startIndex + a.numRows;
+
+      const requests = [{
+        insertDimension: {
+          range: {
+            sheetId: sheet.properties.sheetId,
+            dimension: "ROWS",
+            startIndex,
+            endIndex
+          },
+          inheritFromBefore: a.inheritFromBefore
+        }
+      }];
+
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: a.spreadsheetId,
+        requestBody: { requests }
+      });
+
+      return {
+        content: [{ type: "text", text: `Inserted ${a.numRows} row(s) before row ${a.beforeRow} in sheet "${a.sheetName}"` }],
+        isError: false
+      };
+    }
     case "mergeGoogleSheetCells": {
       const validation = MergeGoogleSheetCellsSchema.safeParse(args);
       if (!validation.success) {
