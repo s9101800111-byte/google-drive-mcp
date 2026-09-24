@@ -1084,7 +1084,7 @@ export async function handleTool(
 
       const rangeData = await sheets.spreadsheets.get({
         spreadsheetId: a.spreadsheetId,
-        fields: 'sheets(properties(sheetId,title),basicFilter)'
+        fields: 'sheets(properties(sheetId,title))'
       });
 
       const { sheetName, cellRange: a1Range } = parseA1Range(a.range);
@@ -1093,10 +1093,9 @@ export async function handleTool(
         return errorResponse(`Sheet "${sheetName}" not found`);
       }
 
-      const sheetId = sheet.properties.sheetId!;
-      const gridRange = convertA1ToGridRange(a1Range, sheetId);
+      const gridRange = convertA1ToGridRange(a1Range, sheet.properties.sheetId!);
 
-      const requests: any[] = [{
+      const requests = [{
         sortRange: {
           range: gridRange,
           sortSpecs: a.sortSpecs.map(s => ({
@@ -1106,17 +1105,6 @@ export async function handleTool(
         }
       }];
 
-      // sortRange was observed to succeed with no effect on a sheet with a basic filter, so lift the
-      // filter around the sort and restore it (minus its own sortSpecs, which would re-sort).
-      const filter = sheet.basicFilter;
-      if (filter) {
-        const restored: any = { range: filter.range };
-        if (filter.filterSpecs?.length) restored.filterSpecs = filter.filterSpecs;
-        else if (filter.criteria) restored.criteria = filter.criteria;
-        requests.unshift({ clearBasicFilter: { sheetId } });
-        requests.push({ setBasicFilter: { filter: restored } });
-      }
-
       await sheets.spreadsheets.batchUpdate({
         spreadsheetId: a.spreadsheetId,
         requestBody: { requests }
@@ -1124,7 +1112,7 @@ export async function handleTool(
 
       const specText = a.sortSpecs.map(s => `${s.column.toUpperCase()} ${s.order}`).join(', ');
       return {
-        content: [{ type: "text", text: `Sorted range ${a.range} by ${specText}${filter ? ' (basic filter temporarily lifted and restored)' : ''}` }],
+        content: [{ type: "text", text: `Sorted range ${a.range} by ${specText}` }],
         isError: false
       };
     }
