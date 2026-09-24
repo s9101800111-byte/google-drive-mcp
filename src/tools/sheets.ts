@@ -1084,7 +1084,7 @@ export async function handleTool(
 
       const rangeData = await sheets.spreadsheets.get({
         spreadsheetId: a.spreadsheetId,
-        fields: 'sheets(properties(sheetId,title))'
+        fields: 'sheets(properties(sheetId,title,gridProperties(rowCount,columnCount)))'
       });
 
       const { sheetName, cellRange: a1Range } = parseA1Range(a.range);
@@ -1094,6 +1094,12 @@ export async function handleTool(
       }
 
       const gridRange = convertA1ToGridRange(a1Range, sheet.properties.sheetId!);
+      // An open-ended range (e.g. "A2:AA") returns 200 but sorts nothing, so pin every bound.
+      const grid = sheet.properties.gridProperties;
+      gridRange.startRowIndex ??= 0;
+      gridRange.startColumnIndex ??= 0;
+      gridRange.endRowIndex ??= grid?.rowCount ?? undefined;
+      gridRange.endColumnIndex ??= grid?.columnCount ?? undefined;
 
       const requests = [{
         sortRange: {
