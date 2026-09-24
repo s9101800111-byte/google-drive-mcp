@@ -1094,12 +1094,10 @@ export async function handleTool(
       }
 
       const gridRange = convertA1ToGridRange(a1Range, sheet.properties.sheetId!);
-      // An open-ended range (e.g. "A2:AA") returns 200 but sorts nothing, so pin every bound.
-      const grid = sheet.properties.gridProperties;
-      gridRange.startRowIndex ??= 0;
-      gridRange.startColumnIndex ??= 0;
-      gridRange.endRowIndex ??= grid?.rowCount ?? undefined;
-      gridRange.endColumnIndex ??= grid?.columnCount ?? undefined;
+      // convertA1ToGridRange turns "A2:AA" into the single row 2, so extend an open end row to the sheet's last row.
+      if (/:[A-Za-z]+$/.test(a1Range)) {
+        gridRange.endRowIndex = sheet.properties.gridProperties?.rowCount ?? undefined;
+      }
 
       const requests = [{
         sortRange: {
