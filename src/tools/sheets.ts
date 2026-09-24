@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { ToolDefinition, ToolResult, ToolContext } from '../types.js';
 import { errorResponse } from '../types.js';
-import { parseA1Range, convertA1ToGridRange, escapeDriveQuery, type GridRange } from '../utils.js';
+import { parseA1Range, convertA1ToGridRange, colToIndex, escapeDriveQuery, type GridRange } from '../utils.js';
 
 // ---------------------------------------------------------------------------
 // Zod Schemas
@@ -92,6 +92,15 @@ const InsertSheetRowsSchema = z.object({
   beforeRow: z.number().int().min(1, "beforeRow must be >= 1 (1-based row number to insert before)"),
   numRows: z.number().int().min(1).default(1),
   inheritFromBefore: z.boolean().optional().default(true)
+});
+
+const SortSheetRangeSchema = z.object({
+  spreadsheetId: z.string().min(1, "Spreadsheet ID is required"),
+  range: z.string().min(1, "Range is required"),
+  sortSpecs: z.array(z.object({
+    column: z.string().regex(/^[A-Za-z]+$/, "column must be a column letter (e.g., 'C')"),
+    order: z.enum(["ASCENDING", "DESCENDING"]).optional().default("ASCENDING")
+  })).min(1, "At least one sort spec is required")
 });
 
 const AddGoogleSheetConditionalFormatSchema = z.object({
@@ -390,6 +399,30 @@ export const toolDefinitions: ToolDefinition[] = [
         inheritFromBefore: { type: "boolean", description: "Inherit formatting from the row above the insertion point (default true)" }
       },
       required: ["spreadsheetId", "sheetName", "beforeRow"]
+    }
+  },
+  {
+    name: "sortSheetRange",
+    description: "Sort the rows of a range in a Google Sheet by one or more columns (like Data > Sort range). Whole rows move together with their formatting; values are not rewritten. Exclude the header row from the range.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        spreadsheetId: { type: "string", description: "Spreadsheet ID" },
+        range: { type: "string", description: "Range to sort, without the header row (e.g., 'Sheet1!A2:AA' sorts to the last row)" },
+        sortSpecs: {
+          type: "array",
+          description: "Sort keys in priority order",
+          items: {
+            type: "object",
+            properties: {
+              column: { type: "string", description: "Column letter on the sheet (e.g., 'C')" },
+              order: { type: "string", enum: ["ASCENDING", "DESCENDING"], description: "Default ASCENDING" }
+            },
+            required: ["column"]
+          }
+        }
+      },
+      required: ["spreadsheetId", "range", "sortSpecs"]
     }
   },
   {
@@ -1036,6 +1069,50 @@ export async function handleTool(
 
       return {
         content: [{ type: "text", text: `Inserted ${a.numRows} row(s) before row ${a.beforeRow} in sheet "${a.sheetName}"` }],
+        isError: false
+      };
+    }
+
+    case "sortSheetRange": {
+      const validation = SortSheetRangeSchema.safeParse(args);
+      if (!validation.success) {
+        return errorResponse(validation.error.errors[0].message);
+      }
+      const a = validation.data;
+
+      const sheets = ctx.google.sheets({ version: 'v4', auth: ctx.authClient });
+
+      const rangeData = await sheets.spreadsheets.get({
+        spreadsheetId: a.spreadsheetId,
+        fields: 'sheets(properties(sheetId,title))'
+      });
+
+      const { sheetName, cellRange: a1Range } = parseA1Range(a.range);
+      const sheet = rangeData.data.sheets?.find(s => s.properties?.title === sheetName);
+      if (!sheet || sheet.properties?.sheetId === undefined || sheet.properties?.sheetId === null) {
+        return errorResponse(`Sheet "${sheetName}" not found`);
+      }
+
+      const gridRange = convertA1ToGridRange(a1Range, sheet.properties.sheetId!);
+
+      const requests = [{
+        sortRange: {
+          range: gridRange,
+          sortSpecs: a.sortSpecs.map(s => ({
+            dimensionIndex: colToIndex(s.column.toUpperCase()),
+            sortOrder: s.order
+          }))
+        }
+      }];
+
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: a.spreadsheetId,
+        requestBody: { requests }
+      });
+
+      const specText = a.sortSpecs.map(s => `${s.column.toUpperCase()} ${s.order}`).join(', ');
+      return {
+        content: [{ type: "text", text: `Sorted range ${a.range} by ${specText}` }],
         isError: false
       };
     }
