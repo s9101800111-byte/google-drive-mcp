@@ -103,6 +103,14 @@ const SortSheetRangeSchema = z.object({
   })).min(1, "At least one sort spec is required")
 });
 
+const MoveSheetColumnsSchema = z.object({
+  spreadsheetId: z.string().min(1, "Spreadsheet ID is required"),
+  sheetName: z.string().min(1, "Sheet name is required"),
+  startColumn: z.string().regex(/^[A-Za-z]+$/, "startColumn must be a column letter (e.g., 'C')"),
+  endColumn: z.string().regex(/^[A-Za-z]+$/, "endColumn must be a column letter (e.g., 'E')").optional(),
+  beforeColumn: z.string().regex(/^[A-Za-z]+$/, "beforeColumn must be a column letter (e.g., 'U')")
+});
+
 const AddGoogleSheetConditionalFormatSchema = z.object({
   spreadsheetId: z.string().min(1, "Spreadsheet ID is required"),
   range: z.string().min(1, "Range is required"),
@@ -423,6 +431,21 @@ export const toolDefinitions: ToolDefinition[] = [
         }
       },
       required: ["spreadsheetId", "range", "sortSpecs"]
+    }
+  },
+  {
+    name: "moveSheetColumns",
+    description: "Move one column (or a contiguous block of columns) to sit before another column (like dragging a column header in the UI). Values, formulas, formatting and widths move with the column, and formula references elsewhere are adjusted automatically. Column letters refer to the sheet BEFORE the move.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        spreadsheetId: { type: "string", description: "Spreadsheet ID" },
+        sheetName: { type: "string", description: "Sheet/tab name" },
+        startColumn: { type: "string", description: "First column to move (e.g., 'C')" },
+        endColumn: { type: "string", description: "Last column to move, inclusive (default = startColumn)" },
+        beforeColumn: { type: "string", description: "Place the moved column(s) immediately before this column (e.g., 'U')" }
+      },
+      required: ["spreadsheetId", "sheetName", "startColumn", "beforeColumn"]
     }
   },
   {
@@ -1117,6 +1140,75 @@ export async function handleTool(
       const specText = a.sortSpecs.map(s => `${s.column.toUpperCase()} ${s.order}`).join(', ');
       return {
         content: [{ type: "text", text: `Sorted range ${a.range} by ${specText}` }],
+        isError: false
+      };
+    }
+
+    case "moveSheetColumns": {
+      const validation = MoveSheetColumnsSchema.safeParse(args);
+      if (!validation.success) {
+        return errorResponse(validation.error.errors[0].message);
+      }
+      const a = validation.data;
+      const startCol = a.startColumn.toUpperCase();
+      const endCol = (a.endColumn ?? a.startColumn).toUpperCase();
+      const beforeCol = a.beforeColumn.toUpperCase();
+
+      const startIndex = colToIndex(startCol);
+      const endIndex = colToIndex(endCol) + 1;
+      const destinationIndex = colToIndex(beforeCol);
+      if (endIndex <= startIndex) {
+        return errorResponse(`endColumn ${endCol} is before startColumn ${startCol}`);
+      }
+      if (destinationIndex >= startIndex && destinationIndex <= endIndex) {
+        return errorResponse(`beforeColumn ${beforeCol} must be outside ${startCol}:${endCol} and not directly after it`);
+      }
+
+      const sheets = ctx.google.sheets({ version: 'v4', auth: ctx.authClient });
+
+      const rangeData = await sheets.spreadsheets.get({
+        spreadsheetId: a.spreadsheetId,
+        fields: 'sheets(properties(sheetId,title,gridProperties(columnCount)))'
+      });
+
+      const sheet = rangeData.data.sheets?.find(s => s.properties?.title === a.sheetName);
+      if (!sheet || sheet.properties?.sheetId === undefined || sheet.properties?.sheetId === null) {
+        return errorResponse(`Sheet "${a.sheetName}" not found`);
+      }
+      const columnCount = sheet.properties.gridProperties?.columnCount ?? 0;
+      if (endIndex > columnCount || destinationIndex > columnCount) {
+        return errorResponse(`Column out of range: sheet "${a.sheetName}" has ${columnCount} columns`);
+      }
+
+      // destinationIndex is in pre-move coordinates, as the Sheets API expects.
+      const requests = [{
+        moveDimension: {
+          source: {
+            sheetId: sheet.properties.sheetId,
+            dimension: "COLUMNS",
+            startIndex,
+            endIndex
+          },
+          destinationIndex
+        }
+      }];
+
+      await sheets.spreadsheets.batchUpdate({
+        spreadsheetId: a.spreadsheetId,
+        requestBody: { requests }
+      });
+
+      const count = endIndex - startIndex;
+      const newStart = destinationIndex > startIndex ? destinationIndex - count : destinationIndex;
+      const toCol = (i: number) => {
+        let s = '';
+        for (let n = i + 1; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + (n - 1) % 26) + s;
+        return s;
+      };
+      const moved = count === 1 ? startCol : `${startCol}:${endCol}`;
+      const now = count === 1 ? toCol(newStart) : `${toCol(newStart)}:${toCol(newStart + count - 1)}`;
+      return {
+        content: [{ type: "text", text: `Moved column(s) ${moved} before ${beforeCol} in sheet "${a.sheetName}"; they are now at ${now}` }],
         isError: false
       };
     }
